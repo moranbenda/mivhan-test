@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ניהול מבחנים</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;direction:rtl;text-align:right;background:#f3f4f6;margin:0;color:#111827}
+header{background:#111827;color:white;padding:16px 22px;position:sticky;top:0;z-index:10}
+main{max-width:1250px;margin:auto;padding:18px}
+.card{background:white;border:1px solid #ddd;border-radius:16px;padding:18px;margin:16px 0;box-shadow:0 2px 8px #0001}
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;align-items:end}
+label{font-weight:bold;display:block}
+select,input{width:100%;padding:11px;border:1px solid #bbb;border-radius:10px;margin-top:6px;font-size:15px}
+button,.btn{background:#111827;color:white;border:0;border-radius:10px;padding:10px 14px;margin:4px;cursor:pointer;text-decoration:none;display:inline-block}
+button.secondary{background:#e5e7eb;color:#111827}
+button.danger{background:#991b1b}
+table{width:100%;border-collapse:collapse;background:white;margin-top:10px}
+th,td{border:1px solid #ddd;padding:9px;text-align:right;vertical-align:top}
+th{background:#f9fafb}
+tr:hover td{background:#fafafa}
+.ok{color:#047857;font-weight:bold}
+.bad{color:#b91c1c;font-weight:bold}
+.muted{color:#6b7280;font-size:14px}
+.summary{display:flex;gap:10px;flex-wrap:wrap}
+.stat{background:#eef2ff;border:1px solid #c7d2fe;border-radius:12px;padding:10px 14px}
+#details{display:none}
+@media(max-width:700px){
+  main{padding:10px}
+  .card{padding:13px}
+  table{font-size:13px}
+  th,td{padding:6px}
+}
+@media print{
+  header,.no-print,#listCard,#filtersCard{display:none!important}
+  body{background:white}
+  main{max-width:none;padding:0}
+  .card{border:0;box-shadow:none;margin:0;padding:0}
+  #details{display:block!important}
+  table{font-size:12px}
+}
+</style>
+</head>
+<body>
+<header>
+  <h2 style="margin:0">ניהול מבחנים</h2>
+  <div class="muted" style="color:#d1d5db">סינון לפי מבחן, חיפוש נבחנים, צפייה בתשובות והורדת PDF אישי</div>
+</header>
+
+<main>
+<section class="card no-print" id="filtersCard">
+  <h3>סינון וחיפוש</h3>
+  <div class="controls">
+    <label>בחירת מבחן
+      <select id="examFilter" onchange="applyFilters()">
+        <option value="">כל המבחנים</option>
+      </select>
+    </label>
+    <label>חיפוש לפי שם / ת״ז
+      <input id="searchInput" placeholder="לדוגמה: ישראל ישראלי / 123456789" oninput="applyFilters()">
+    </label>
+    <div>
+      <button onclick="loadAll()">רענון נתונים</button>
+      <button class="secondary" onclick="clearFilters()">ניקוי סינון</button>
+    </div>
+  </div>
+</section>
+
+<section class="card no-print">
+  <h3>סיכום</h3>
+  <div class="summary">
+    <div class="stat">סה״כ הגשות: <b id="totalCount">0</b></div>
+    <div class="stat">מוצגות כרגע: <b id="shownCount">0</b></div>
+    <div class="stat">ממוצע ציונים: <b id="avgScore">-</b></div>
+  </div>
+</section>
+
+<section class="card" id="listCard">
+  <h3>הגשות</h3>
+  <div id="list">טוען...</div>
+</section>
+
+<section class="card" id="details">
+  <div id="detailsContent"></div>
+</section>
+</main>
+
+<script>
+const SUPABASE_URL = "https://pnxxpeductfuddfzdvtu.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBueHhwZWR1Y3RmdWRkZnpkdnR1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxMDQyMTMsImV4cCI6MjA5NDY4MDIxM30.4Rmj5t_S7NerwktFUnMN8S4nNkl9SUqts9wG8v90bXk";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let allSubmissions = [];
+let filteredSubmissions = [];
+let examsMap = new Map();
+
+async function loadAll(){
+  document.getElementById('list').innerHTML = 'טוען...';
+  document.getElementById('details').style.display = 'none';
+
+  const examsRes = await db.from('exams').select('id,exam_name').order('exam_name', {ascending:true});
+  if(examsRes.error){
+    document.getElementById('list').innerHTML = '<p style="color:red">שגיאה בטעינת מבחנים: '+examsRes.error.message+'</p>';
+    return;
+  }
+  examsMap = new Map((examsRes.data || []).map(e => [e.id, e.exam_name]));
+  renderExamOptions(examsRes.data || []);
+
+  const res = await db
+    .from('submissions')
+    .select('id,score,submitted_at,student_id,exam_id,students(full_name,id_number),exams(exam_name)')
+    .order('submitted_at', {ascending:false});
+
+  if(res.error){
+    document.getElementById('list').innerHTML = '<p style="color:red">שגיאה בטעינת הגשות: '+res.error.message+'</p>';
+    return;
+  }
+
+  allSubmissions = res.data || [];
+  applyFilters();
+}
+
+function renderExamOptions(exams){
+  const select = document.getElementById('examFilter');
+  const current = select.value;
+  select.innerHTML = '<option value="">כל המבחנים</option>' + exams.map(e =>
+    `<option value="${e.id}">${escapeHtml(e.exam_name)}</option>`
+  ).join('');
+  select.value = current;
+}
+
+function applyFilters(){
+  const examId = document.getElementById('examFilter').value;
+  const search = document.getElementById('searchInput').value.trim().toLowerCase();
+
+  filteredSubmissions = allSubmissions.filter(s => {
+    const examOk = !examId || s.exam_id === examId;
+    const name = (s.students?.full_name || '').toLowerCase();
+    const idn = (s.students?.id_number || '').toLowerCase();
+    const searchOk = !search || name.includes(search) || idn.includes(search);
+    return examOk && searchOk;
+  });
+
+  renderList();
+  renderStats();
+}
+
+function clearFilters(){
+  document.getElementById('examFilter').value = '';
+  document.getElementById('searchInput').value = '';
+  applyFilters();
+}
+
+function renderStats(){
+  document.getElementById('totalCount').textContent = allSubmissions.length;
+  document.getElementById('shownCount').textContent = filteredSubmissions.length;
+  if(filteredSubmissions.length){
+    const avg = filteredSubmissions.reduce((sum,s)=>sum + Number(s.score || 0),0) / filteredSubmissions.length;
+    document.getElementById('avgScore').textContent = avg.toFixed(1) + '/100';
+  } else {
+    document.getElementById('avgScore').textContent = '-';
+  }
+}
+
+function renderList(){
+  if(!filteredSubmissions.length){
+    document.getElementById('list').innerHTML = '<p class="muted">אין הגשות להצגה.</p>';
+    return;
+  }
+
+  document.getElementById('list').innerHTML = `
+    <table>
+      <tr>
+        <th>שם</th>
+        <th>ת״ז</th>
+        <th>מבחן</th>
+        <th>ציון</th>
+        <th>תאריך הגשה</th>
+        <th>פעולות</th>
+      </tr>
+      ${filteredSubmissions.map(s => `
+        <tr>
+          <td>${escapeHtml(s.students?.full_name || '')}</td>
+          <td>${escapeHtml(s.students?.id_number || '')}</td>
+          <td>${escapeHtml(s.exams?.exam_name || examsMap.get(s.exam_id) || '')}</td>
+          <td><b>${Number(s.score || 0)}/100</b></td>
+          <td>${new Date(s.submitted_at).toLocaleString('he-IL')}</td>
+          <td><button onclick="showDetails('${s.id}')">פירוט / PDF</button></td>
+        </tr>
+      `).join('')}
+    </table>
+  `;
+}
+
+async function showDetails(submissionId){
+  const s = allSubmissions.find(x => x.id === submissionId);
+  const res = await db
+    .from('answers')
+    .select('*')
+    .eq('submission_id', submissionId)
+    .order('question_number', {ascending:true});
+
+  if(res.error){
+    alert('שגיאה בטעינת תשובות: ' + res.error.message);
+    return;
+  }
+
+  const answers = res.data || [];
+  const correctCount = answers.filter(a => a.is_correct).length;
+  const wrongCount = answers.length - correctCount;
+
+  document.getElementById('details').style.display = 'block';
+  document.getElementById('detailsContent').innerHTML = `
+    <div class="no-print">
+      <button onclick="window.print()">הורד/שמור PDF לנבחן</button>
+      <button class="secondary" onclick="document.getElementById('details').style.display='none'">סגור פירוט</button>
+    </div>
+
+    <h2>פירוט מבחן לנבחן</h2>
+    <p>
+      <b>שם:</b> ${escapeHtml(s.students?.full_name || '')}<br>
+      <b>ת״ז:</b> ${escapeHtml(s.students?.id_number || '')}<br>
+      <b>מבחן:</b> ${escapeHtml(s.exams?.exam_name || examsMap.get(s.exam_id) || '')}<br>
+      <b>ציון:</b> ${Number(s.score || 0)}/100<br>
+      <b>נכונות:</b> ${correctCount} | <b>שגויות/לא נענו:</b> ${wrongCount}<br>
+      <b>תאריך הגשה:</b> ${new Date(s.submitted_at).toLocaleString('he-IL')}
+    </p>
+
+    <table>
+      <tr>
+        <th>#</th>
+        <th>שאלה</th>
+        <th>תשובת נבחן</th>
+        <th>תשובה נכונה</th>
+        <th>סטטוס</th>
+      </tr>
+      ${answers.map(r => `
+        <tr>
+          <td>${r.question_number}</td>
+          <td>${escapeHtml(r.question_text || '')}</td>
+          <td>${escapeHtml(r.selected_answer || '')}</td>
+          <td>${escapeHtml(r.correct_answer || '')}</td>
+          <td class="${r.is_correct ? 'ok' : 'bad'}">${r.is_correct ? 'נכון' : 'שגוי'}</td>
+        </tr>
+      `).join('')}
+    </table>
+  `;
+
+  document.getElementById('details').scrollIntoView({behavior:'smooth'});
+}
+
+function escapeHtml(value){
+  return String(value)
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'","&#039;");
+}
+
+loadAll();
+</script>
+</body>
+</html>
